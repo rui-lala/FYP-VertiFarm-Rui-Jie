@@ -25,7 +25,7 @@ String myScript = "/macros/s/XXXXXXXXxxxxxxxxxxxxxxxxxxxxxxxxxxxx/exec"; //chang
 // ==========================================
 
 // Timing & Sleep
-uint64_t sleepDurationMin = 5; 
+uint64_t sleepDurationMin = 30; 
 
 // Google Script Parameter Helpers
 String mimeType = "&mimetype=image/jpeg";
