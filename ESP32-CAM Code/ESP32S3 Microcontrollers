@@ -1,0 +1,217 @@
+// Sensitive values in this file (Pls edit accordingly):
+//   - WIFI_PASSWORD          (line ~31) — your WiFi password
+//   - PRIVATE_KEY            (line ~36) — Google Service Account private key
+//                                         (grants full write access to your Sheet)
+//   - VERTIFARM_DEVICE_KEY   (line ~41) — live API secret key
+//                                         (grants write access to your live dashboard)
+// After flashing, open Serial Monitor at 115200 baud.
+// =============================================================================
+#include <WiFi.h>
+#include "time.h"
+#include <Wire.h>
+#include <DHT.h>
+#include <BH1750.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+#include <ESP_Google_Sheet_Client.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+// --- GPIO CONFIGURATION ---
+#define ONE_WIRE_BUS 5
+#define TdsSensorPin 1
+#define PHSensorPin  4
+#define DHTPIN 2
+#define DHTTYPE DHT22
+#define I2C_SDA 18
+#define I2C_SCL 17
+#define VREF 3.3
+
+//WIFI & GOOGLE CONFIG
+#define WIFI_SSID "WIFI SSID" //enter your WIFI ssid
+#define WIFI_PASSWORD "WIFI PASSWORD" // enter your WIFI password
+#define PROJECT_ID "GOOGLE PROJECT ID" //enter your google project id
+#define CLIENT_EMAIL "XXXXXXXXXXXXXXXXXXX.iam.gserviceaccount.com" // enter your google service account
+
+//Google Service Account private key 
+const char PRIVATE_KEY[] PROGMEM = "-----BEGIN PRIVATE KEY-----\yourprivatekey\n-----END PRIVATE KEY-----\n";
+const char spreadsheetId[] = "yourspreadsheetID"; // enter google spreadsheet id
+
+//VERTIFARM LIVE API CONFIG
+#define VERTIFARM_API_URL    "https://api.chowchengen.com/api/live/reading" //VERTIFARM website (change to your own website)
+#define VERTIFARM_DEVICE_KEY "privatekey" //enter your own private key
+
+BH1750 lightMeter;
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature ds18b20(&oneWire);
+DHT dht(DHTPIN, DHTTYPE);
+
+unsigned long lastTime = 0;
+const unsigned long timerDelay = 60000;
+float ph_offset = 23.53;
+
+//Singapore Time String
+String getTimeString() {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) {
+    return "Time Sync Error";
+  }
+  char timeStringBuff[25];
+    strftime(timeStringBuff, sizeof(timeStringBuff), "%Y-%m-%d %H:%M:%S", &timeinfo);
+  return String(timeStringBuff);
+}
+
+//VERTIFARM HELPER - Converts "N/A" sensor strings to JSON null; otherwise parses as float.
+void addSensorField(JsonObject& obj, const char* key, const String& strVal) {
+  if (strVal == "N/A") { 
+    obj[key] = nullptr;
+  } else {
+    obj[key] = strVal.toFloat();
+  }
+}
+
+//VERTIFARM POST FUNCTION ---
+// Builds a JSON payload from the current sensor readings and POSTs to the live API.
+// Called once per measurement cycle, after the GSheet block.
+void postToVertiFarm(String currentTime, String airTStr, String airHStr,
+                     String luxStr, String wTStr, String tdsStr, String phStr) {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("✗ VertiFarm POST skipped: WiFi not connected.");
+    return;
+  }
+
+  StaticJsonDocument<256> doc;
+  JsonObject obj = doc.to<JsonObject>();
+  obj["timestamp"] = currentTime;
+  addSensorField(obj, "air_temp",   airTStr);
+  addSensorField(obj, "humidity",   airHStr);
+  addSensorField(obj, "lux",        luxStr);
+  addSensorField(obj, "water_temp", wTStr);
+  addSensorField(obj, "tds",        tdsStr);
+  addSensorField(obj, "ph",         phStr);
+
+  String payload;
+  serializeJson(doc, payload);
+
+  HTTPClient http;
+  http.begin(VERTIFARM_API_URL);
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("X-Device-Key", VERTIFARM_DEVICE_KEY);
+
+  int httpCode = http.POST(payload);
+  if (httpCode == 200) {
+    Serial.println("✓ VertiFarm POST: OK");
+  } else {
+    Serial.printf("✗ VertiFarm POST failed. HTTP %d\n", httpCode);
+  }
+  http.end();
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+  Serial.println("\n--- Starting ESP32-S3 Monitoring System ---");
+
+  Wire.begin(I2C_SDA, I2C_SCL);
+  lightMeter.begin(BH1750::CONTINUOUS_HIGH_RES_MODE_2);
+  ds18b20.begin();
+  dht.begin();
+
+  analogReadResolution(12);
+  analogSetAttenuation(ADC_11db);
+
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  Serial.print("Connecting WiFi");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\n✓ WiFi Connected: " + WiFi.localIP().toString());
+
+  GSheet.setTokenCallback([](TokenInfo info){
+    if (info.status == token_status_error) Serial.printf("Token Error: %s\n", GSheet.getTokenError(info).c_str());
+  });
+
+  GSheet.begin(CLIENT_EMAIL, PROJECT_ID, PRIVATE_KEY);
+
+  // Set to Singapore Time (GMT+8)
+  configTime(28800, 0, "pool.ntp.org", "time.nist.gov");
+}
+
+void loop() {
+  if (millis() - lastTime > timerDelay) {
+    lastTime = millis();
+    Serial.println("\n--- New Measurement Cycle ---");
+
+    //Collect Data
+    ds18b20.requestTemperatures();
+    float waterTemp = ds18b20.getTempCByIndex(0);
+    float lux = lightMeter.readLightLevel();
+    float airT = dht.readTemperature();
+    float airH = dht.readHumidity();
+
+    //Averaging for pH/TDS (Filter Noise)
+    long ph_avg = 0, tds_avg = 0;
+    for(int i=0; i<30; i++) {
+      ph_avg += analogRead(PHSensorPin);
+      tds_avg += analogRead(TdsSensorPin);
+      delay(10);
+    }
+    float ph_volt = (ph_avg / 30.0 * VREF) / 4095.0;
+    float ph_val = (-5.70 * ph_volt) + ph_offset;
+
+    float tds_volt = (tds_avg / 30.0 * VREF) / 4095.0;
+    float compCoeff = 1.0 + 0.02 * (waterTemp - 25.0);
+    float compV = tds_volt / compCoeff;
+    float tds_val = (133.42 * pow(compV, 3) - 255.86 * pow(compV, 2) + 857.39 * compV) * 0.5;
+
+    //String Conversion & Checks
+    String luxStr = (lux < 0) ? "N/A" : String(lux, 1);
+    String wTStr = (waterTemp == -127.0) ? "N/A" : String(waterTemp, 1);
+    String phStr = (ph_volt > 3.2 || ph_volt < 0.1) ? "N/A" : String(ph_val, 2);
+    String tdsStr = (tds_volt < 0.1) ? "N/A" : String(tds_val, 0);
+    String airTStr = isnan(airT) ? "N/A" : String(airT, 1);
+    String airHStr = isnan(airH) ? "N/A" : String(airH, 1);
+    String currentTime = getTimeString();
+
+    //Serial Print ALL readings
+    Serial.printf("[%s]\n", currentTime.c_str());
+    Serial.printf("AIR: %s°C, %s%% | WATER: %s°C\n", airTStr.c_str(), airHStr.c_str(), wTStr.c_str());
+    Serial.printf("LUX: %s | pH: %s | TDS: %s\n", luxStr.c_str(), phStr.c_str(), tdsStr.c_str());
+
+    //GSheet UPLOAD
+    Serial.println("Validating GSheet Client...");
+    int waitCounter = 0;
+    while (!GSheet.ready() && waitCounter < 15) {
+      delay(1000);
+      Serial.print(".");
+      waitCounter++;
+    }
+
+    if (GSheet.ready()) {
+      FirebaseJson response, valueRange;
+      valueRange.add("majorDimension", "COLUMNS");
+
+      // Values mapped to Columns A through G
+      valueRange.set("values/[0]/[0]", currentTime);
+      valueRange.set("values/[1]/[0]", airTStr);
+      valueRange.set("values/[2]/[0]", airHStr);
+      valueRange.set("values/[3]/[0]", luxStr);
+      valueRange.set("values/[4]/[0]", wTStr);
+      valueRange.set("values/[5]/[0]", tdsStr);
+      valueRange.set("values/[6]/[0]", phStr);
+
+      Serial.println("Uploading to Tab: ESP32-Datalogging...");
+      if (GSheet.values.append(&response, spreadsheetId, "ESP32-Datalogging!A2", &valueRange)) {
+        Serial.println("✓ SUCCESS: Data Appended!");
+      } else {
+        Serial.println("✗ FAIL: " + GSheet.errorReason());
+      }
+    } else {
+      Serial.println("✗ TIMEOUT: GSheet Client not ready.");
+    }
+
+    //VERTIFARM LIVE API
+    // Dual-publishes to the VertiFarm backend after the GSheet block.
+    postToVertiFarm(currentTime, airTStr, airHStr, luxStr, wTStr, tdsStr, phStr);
+  }
+}
