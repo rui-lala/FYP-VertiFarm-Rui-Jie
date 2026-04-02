@@ -46,7 +46,7 @@ An IoT hardware system for monitoring a vertical farm environment. Built on the 
 │  │ Sensor Node │          │   (one per camera angle) │  │
 │  └──────┬──────┘          └───────────┬──────────────┘  │
 │         │                             │                 │
-│  Reads sensors every 60s     Wakes every 5 min         │
+│  Reads sensors every 60s     Wakes every 30 min         │
 │  (DHT22, BH1750, DS18B20,    Captures JPEG image       │
 │   TDS, pH)                   Encodes to Base64          │
 └─────────┼─────────────────────────────┼─────────────────┘
@@ -160,7 +160,7 @@ String myScript = "/macros/s/YOUR_SCRIPT_ID/exec";
 
 #define CAMERA_ID "CAM_1"   // Change per camera (CAM_1, CAM_2, etc.)
 
-uint64_t sleepDurationMin = 5;  // Capture interval in minutes
+uint64_t sleepDurationMin = 30;  // Capture interval in minutes
 ```
 
 > ⚠️ **Never commit real credentials to a public repository.** Use placeholder values as shown above or a `secrets.h` file added to `.gitignore`.
@@ -218,25 +218,6 @@ Sensor failures are sent as `null` rather than erroneous values.
 | Image upload timeout | Slow connection or large image | Reduce `FRAMESIZE` or increase `jpeg_quality` value |
 
 ---
-
-## 📁 Suggested Repository Structure
-
-```
-vertifarm-hardware/
-├── FYP_Hardware_Github_Version/
-│   └── FYP_Hardware_Github_Version.ino
-├── FYP_ESP32CAM_Github_Version/
-│   └── FYP_ESP32CAM_Github_Version.ino
-├── google-apps-script/
-│   └── saveImageToDrive.gs        ← your Apps Script here
-├── docs/
-│   └── wiring_diagram.png
-├── .gitignore
-└── README.md
-```
-
----
-
-## 📝 License
+# 📝 License
 
 This project was developed as a Final Year Project (FYP). Please check with the project owner before reusing or distributing.
